@@ -24,8 +24,8 @@ CSV, watershed folder, and source raster, with a typed-input fallback if
 tkinter is unavailable (e.g. headless environments).
 
 Usage:
-    python clip_watershed_raster.py
-    python clip_watershed_raster.py --csv dams.csv --watershed-folder /path/to/watersheds --raster /path/to/source.tif
+    python RasterExtractor.py
+    python RasterExtractor.py --csv dams.csv --watershed-folder /path/to/watersheds --raster /path/to/source.tif
 """
 
 from __future__ import annotations
@@ -207,10 +207,11 @@ def main() -> None:
     if DAM_ID_COL not in df.columns:
         sys.exit(f"Column '{DAM_ID_COL}' not found in {csv_path.name}")
 
-    result_cols = [
-        DAM_ID_COL, "QC_flag", "status", "clip_tif_path",
-        "mean", "min", "max", "sum", "valid_pixel_count",
-    ]
+    # New columns appended by this tool. All original input CSV columns
+    # (Dam name, Latitude, Longitude, Area_km2, etc.) are carried through
+    # to the output unchanged, in addition to these.
+    new_cols = ["QC_flag", "status", "clip_tif_path", "mean", "min", "max", "sum", "valid_pixel_count"]
+    result_cols = list(df.columns) + [c for c in new_cols if c not in df.columns]
 
     # Resume support: reuse existing output, skip dams already processed
     # (QC_flag not NaN, whether the prior attempt succeeded or failed).
@@ -227,18 +228,19 @@ def main() -> None:
         if dam_id in processed_ids:
             continue
 
+        input_fields = row.to_dict()
         matches = find_watershed_matches(watershed_folder, dam_id)
         out_tif = plot_dir / f"{dam_id}_clip.tif"
 
         if len(matches) == 0:
             rows.append({
-                DAM_ID_COL: dam_id, "QC_flag": "ERROR", "status": "No watershed .parquet found",
+                **input_fields, "QC_flag": "ERROR", "status": "No watershed .parquet found",
                 "clip_tif_path": "", "mean": np.nan, "min": np.nan, "max": np.nan,
                 "sum": np.nan, "valid_pixel_count": 0,
             })
         elif len(matches) > 1:
             rows.append({
-                DAM_ID_COL: dam_id, "QC_flag": "ERROR",
+                **input_fields, "QC_flag": "ERROR",
                 "status": f"Ambiguous match: {len(matches)} .parquet files found",
                 "clip_tif_path": "", "mean": np.nan, "min": np.nan, "max": np.nan,
                 "sum": np.nan, "valid_pixel_count": 0,
@@ -248,23 +250,25 @@ def main() -> None:
                 gdf = gpd.read_parquet(matches[0])
                 stats = clip_raster_to_geometry(raster_path, gdf, out_tif)
                 rows.append({
-                    DAM_ID_COL: dam_id, "QC_flag": "OK", "status": "Clipped successfully",
+                    **input_fields, "QC_flag": "OK", "status": "Clipped successfully",
                     "clip_tif_path": str(out_tif), **stats,
                 })
             except Exception as exc:
                 rows.append({
-                    DAM_ID_COL: dam_id, "QC_flag": "ERROR", "status": str(exc),
+                    **input_fields, "QC_flag": "ERROR", "status": str(exc),
                     "clip_tif_path": "", "mean": np.nan, "min": np.nan, "max": np.nan,
                     "sum": np.nan, "valid_pixel_count": 0,
                 })
 
         if len(rows) >= SAVE_EVERY:
-            results = pd.concat([results, pd.DataFrame(rows)], ignore_index=True)
+            new_rows = pd.DataFrame(rows)
+            results = new_rows.copy() if results.empty else pd.concat([results, new_rows], ignore_index=True)
             results.to_csv(out_csv_path, index=False)
             rows = []
 
     if rows:
-        results = pd.concat([results, pd.DataFrame(rows)], ignore_index=True)
+        new_rows = pd.DataFrame(rows)
+        results = new_rows.copy() if results.empty else pd.concat([results, new_rows], ignore_index=True)
         results.to_csv(out_csv_path, index=False)
 
     print(f"Done. Output CSV: {out_csv_path}")
