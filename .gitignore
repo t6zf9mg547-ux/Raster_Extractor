@@ -28,7 +28,12 @@ build/
 *.xlsx
 *.xls
 *.csv
+*.tar
+*.tar.gz
+*.tgz
 Data/
+# Data/_extracted/ (cached extraction of .tar source rasters) is already
+# covered by the Data/ rule above.
 
 # --- Output / generated files -------------------------------------------------
 Output/

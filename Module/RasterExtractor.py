@@ -2,9 +2,14 @@
 """
 Raster Extractor
 ----------------
-For each dam in an input CSV, clips a user-selected raster (.tif) to that
+For each dam in an input CSV, clips a user-selected raster to that
 dam's watershed boundary (a GeoParquet polygon) and reports basic raster
 statistics.
+
+The source raster can be a plain .tif/.tiff, or a .tar/.tar.gz/.tgz archive
+containing one (e.g. an OpenTopography COP30 download). Archives are
+extracted once into Data/_extracted/{archive_stem}/ and the .tif found
+inside is used; on later runs the cached extraction is reused.
 
 Project layout (matches Watershed Generator / Downstream River Course
 conventions):
@@ -26,12 +31,14 @@ tkinter is unavailable (e.g. headless environments).
 Usage:
     python RasterExtractor.py
     python RasterExtractor.py --csv dams.csv --watershed-folder /path/to/watersheds --raster /path/to/source.tif
+    python RasterExtractor.py --csv dams.csv --watershed-folder /path/to/watersheds --raster /path/to/rasters_COP30.tar
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import tarfile
 from pathlib import Path
 
 import geopandas as gpd
@@ -103,7 +110,9 @@ def get_inputs(project_root: Path) -> tuple[Path, Path, Path]:
         type=Path,
         help="Folder containing {Dam_ID}_* watershed boundary .parquet files",
     )
-    parser.add_argument("--raster", type=Path, help="Source raster (.tif) to clip")
+    parser.add_argument(
+        "--raster", type=Path, help="Source raster to clip (.tif/.tiff, or a .tar/.tar.gz containing one)"
+    )
     args = parser.parse_args()
 
     data_dir = project_root / "Data"
@@ -125,9 +134,10 @@ def get_inputs(project_root: Path) -> tuple[Path, Path, Path]:
     )
     raster_path = args.raster or _pick_file(
         "Step 3 of 3 — Select source raster",
-        "Choose the source raster (.tif) that will be clipped\n"
-        "to each dam's watershed boundary.",
-        [("GeoTIFF", "*.tif"), ("All files", "*.*")],
+        "Choose the source raster that will be clipped to each dam's\n"
+        "watershed boundary. A .tar/.tar.gz archive containing a single\n"
+        "raster (e.g. an OpenTopography COP30 download) also works.",
+        [("GeoTIFF", "*.tif *.tiff"), ("Raster archive", "*.tar *.tar.gz *.tgz"), ("All files", "*.*")],
         initialdir=data_dir,
     )
 
@@ -140,6 +150,46 @@ def get_inputs(project_root: Path) -> tuple[Path, Path, Path]:
 def find_watershed_matches(watershed_folder: Path, dam_id: str) -> list[Path]:
     """Match watershed .parquet file(s) by filename PREFIX '{dam_id}_*'."""
     return sorted(watershed_folder.glob(f"{dam_id}_*.parquet"))
+
+
+def _is_tar_archive(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2"))
+
+
+def resolve_raster_path(raster_path: Path, project_root: Path) -> Path:
+    """If raster_path is a .tar/.tar.gz/.tgz archive, extract it (once,
+    cached under Data/_extracted/{archive_stem}/) and return the .tif/.tiff
+    found inside. Otherwise return raster_path unchanged."""
+    if not _is_tar_archive(raster_path):
+        return raster_path
+
+    archive_stem = raster_path.name.split(".tar")[0]
+    extract_dir = project_root / "Data" / "_extracted" / archive_stem
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    def _find_tifs() -> list[Path]:
+        return sorted(extract_dir.rglob("*.tif")) + sorted(extract_dir.rglob("*.tiff"))
+
+    tif_files = _find_tifs()
+    if not tif_files:
+        print(f"Extracting {raster_path.name} into {extract_dir} ...")
+        with tarfile.open(raster_path, "r:*") as tar:
+            try:
+                tar.extractall(extract_dir, filter="data")  # Python 3.12+ safe extraction
+            except TypeError:
+                tar.extractall(extract_dir)  # older Python without the filter arg
+        tif_files = _find_tifs()
+
+    if not tif_files:
+        sys.exit(f"No .tif/.tiff file found inside archive: {raster_path}")
+    if len(tif_files) > 1:
+        print(
+            f"Warning: {len(tif_files)} rasters found inside {raster_path.name}; "
+            f"using {tif_files[0].name}"
+        )
+
+    return tif_files[0]
 
 
 def clip_raster_to_geometry(raster_path: Path, gdf: gpd.GeoDataFrame, out_path: Path) -> dict:
@@ -195,6 +245,8 @@ def main() -> None:
     for label, p in [("CSV", csv_path), ("Watershed folder", watershed_folder), ("Raster", raster_path)]:
         if not p.exists():
             sys.exit(f"{label} not found: {p}")
+
+    raster_path = resolve_raster_path(raster_path, project_root)
 
     output_dir = project_root / "Output"
     plot_dir = project_root / "Plot" / csv_path.stem
